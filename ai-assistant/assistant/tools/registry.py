@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from .base import Tool, ToolSpec
-from .files import ListFilesTool, ReadFileTool
+from .files import ListFilesTool, ReadFileTool, WriteFileTool
 from .policy import ToolPolicy
 
 
@@ -42,9 +42,11 @@ def build_default_registry(
     *,
     policy: ToolPolicy | None = None,
     read_root: Path | str | None = None,
+    write_root: Path | str | None = None,
     max_file_bytes: int | None = None,
     max_output_bytes: int | None = None,
     max_list_entries: int | None = None,
+    include_writes: bool = True,
 ) -> ToolRegistry:
     if isinstance(root, ToolPolicy):
         policy = root
@@ -54,12 +56,21 @@ def build_default_registry(
     if policy is not None:
         if base_root is None:
             base_root = policy.read_root
+        if write_root is None:
+            write_root = policy.write_root
         if max_file_bytes is None:
             max_file_bytes = policy.max_file_bytes
         if max_output_bytes is None:
             max_output_bytes = policy.max_output_bytes
         if max_list_entries is None:
             max_list_entries = policy.max_list_entries
+
+    if write_root is None:
+        write_root = (
+            Path(base_root) / "workspace"
+            if base_root is not None
+            else None
+        )
 
     registry = ToolRegistry()
     registry.register(
@@ -76,10 +87,34 @@ def build_default_registry(
             max_output_bytes=max_output_bytes,
         )
     )
+    if include_writes:
+        registry.register(
+            WriteFileTool(
+                write_root,
+                max_file_bytes=max_file_bytes,
+            )
+        )
     return registry
 
 
-build_readonly_registry = build_default_registry
+def build_readonly_registry(
+    root: Path | str | ToolPolicy | None = None,
+    *,
+    policy: ToolPolicy | None = None,
+    read_root: Path | str | None = None,
+    max_file_bytes: int | None = None,
+    max_output_bytes: int | None = None,
+    max_list_entries: int | None = None,
+) -> ToolRegistry:
+    return build_default_registry(
+        root,
+        policy=policy,
+        read_root=read_root,
+        max_file_bytes=max_file_bytes,
+        max_output_bytes=max_output_bytes,
+        max_list_entries=max_list_entries,
+        include_writes=False,
+    )
 
 
 __all__ = [

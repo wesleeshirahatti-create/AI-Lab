@@ -59,7 +59,10 @@ class ToolGateway:
             argument_summary: dict[str, Any] = {}
         elif isinstance(arguments, Mapping):
             normalized_arguments = dict(arguments)
-            argument_summary = self._summarize_arguments(normalized_arguments)
+            argument_summary = self._summarize_arguments(
+                normalized_arguments,
+                allow_content_preview=False,
+            )
         else:
             normalized_arguments = {}
             argument_summary = {"value_type": type(arguments).__name__}
@@ -106,6 +109,12 @@ class ToolGateway:
                 started,
             )
 
+        allow_content_preview = not tool.spec.mutating
+        event["arguments"] = self._summarize_arguments(
+            normalized_arguments,
+            allow_content_preview=allow_content_preview,
+        )
+
         try:
             validated = tool.validate(normalized_arguments)
         except ToolValidationError as exc:
@@ -139,7 +148,10 @@ class ToolGateway:
             )
 
         normalized_validated = dict(validated)
-        event["arguments"] = self._summarize_arguments(normalized_validated)
+        event["arguments"] = self._summarize_arguments(
+            normalized_validated,
+            allow_content_preview=allow_content_preview,
+        )
 
         denial = self.policy.denial_reason(tool.spec)
         if denial is not None:
@@ -237,7 +249,10 @@ class ToolGateway:
                 ),
                 "output_bytes": len(result.output.encode("utf-8")),
                 "error": result.error[:500],
-                "metadata": self._summarize_arguments(dict(result.metadata)),
+                "metadata": self._summarize_arguments(
+                    dict(result.metadata),
+                    allow_content_preview=False,
+                ),
             }
         )
         if error_type is not None:
@@ -252,13 +267,19 @@ class ToolGateway:
         return result
 
     def _summarize_arguments(
-        self, arguments: Mapping[str, Any]
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        allow_content_preview: bool = True,
     ) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         for key, value in arguments.items():
             name = str(key)[:100]
             if name.lower() in _SENSITIVE_ARGUMENT_NAMES:
-                summary[name] = self._content_summary(value)
+                summary[name] = self._content_summary(
+                    value,
+                    allow_preview=allow_content_preview,
+                )
             elif isinstance(value, str):
                 summary[name] = value[:200]
             elif isinstance(value, (int, float, bool)) or value is None:
@@ -267,7 +288,12 @@ class ToolGateway:
                 summary[name] = f"<{type(value).__name__}>"
         return summary
 
-    def _content_summary(self, value: Any) -> dict[str, Any]:
+    def _content_summary(
+        self,
+        value: Any,
+        *,
+        allow_preview: bool = True,
+    ) -> dict[str, Any]:
         if not isinstance(value, str):
             return {"type": type(value).__name__}
         encoded = value.encode("utf-8")
@@ -275,7 +301,7 @@ class ToolGateway:
             "sha256": hashlib.sha256(encoded).hexdigest(),
             "bytes": len(encoded),
         }
-        if self.policy.log_content:
+        if allow_preview and self.policy.log_content:
             summary["preview"] = value[:200]
         return summary
 

@@ -2,21 +2,22 @@
 
 A lightweight command-line chat assistant that talks to a locally installed Qwen
 model through Ollama. It uses only the Python standard library and keeps a
-bounded conversation history. Version 0.3 adds opt-in, read-only workspace
-tools with native Ollama tool calling.
+bounded conversation history. Version 0.3 adds opt-in workspace tools with
+native Ollama tool calling, including a controlled write tool that requires
+explicit human approval.
 
 ## Structure
 
 | Path | Purpose |
 | --- | --- |
 | `README.md` | Project overview and usage instructions. |
-| `main.py` | Command-line entry point and interactive chat loop. |
+| `main.py` | Command-line entry point, chat loop, and approval prompts. |
 | `requirements.txt` | Dependency list; no third-party packages are required. |
 | `config.py` | Environment-backed application and Ollama settings. |
 | `assistant/__init__.py` | Exposes the assistant package API. |
 | `assistant/core.py` | Ollama chat client, tool-call loop, history, and errors. |
 | `assistant/tools/base.py` | Tool specifications, results, and error types. |
-| `assistant/tools/files.py` | Read-only `list_files` and `read_file` tools. |
+| `assistant/tools/files.py` | `list_files`, `read_file`, and controlled `write_file`. |
 | `assistant/tools/registry.py` | Explicit tool registration and defaults. |
 | `assistant/tools/policy.py` | Enablement, paths, limits, and approval policy. |
 | `assistant/tools/gateway.py` | Validation, permission checks, execution, and audit. |
@@ -63,16 +64,18 @@ Settings are read from optional environment variables:
 
 Tool settings are opt-in:
 
-- `TOOLS_ENABLED` - enable read-only tools (default: `false`)
+- `TOOLS_ENABLED` - enable tools (default: `false`)
 - `TOOL_READ_ROOT` - read root, must stay inside `ai-assistant` (default: `ai-assistant`)
+- `TOOL_WRITE_ROOT` - write root, must stay inside `ai-assistant` (default: `ai-assistant/workspace`)
+- `TOOL_ALLOW_WRITES` - enable the mutating `write_file` tool (default: `false`)
 - `TOOL_AUTO_APPROVE_READS` - auto-approve read-only tools (default: `true`)
-- `TOOL_REQUIRE_CONFIRMATION` - require confirmation for non-auto tools (default: `true`)
-- `TOOL_MAX_FILE_BYTES` - largest file that may be read (default: `65536`)
+- `TOOL_REQUIRE_CONFIRMATION` - require confirmation for non-mutating tools (default: `true`)
+- `TOOL_MAX_FILE_BYTES` - largest file that may be read; write content is capped at `65536` (default: `65536`)
 - `TOOL_MAX_OUTPUT_BYTES` - largest tool result sent to the model (default: `8192`)
 - `TOOL_MAX_LIST_ENTRIES` - largest directory listing (default: `200`)
 - `TOOL_MAX_ROUNDS` - tool-call rounds per request, capped at `2` (default: `2`)
 - `TOOL_LOG_PATH` - audit log path inside the project (default: `logs/tool_calls.jsonl`)
-- `TOOL_LOG_CONTENT` - include short argument previews in the audit log (default: `false`)
+- `TOOL_LOG_CONTENT` - include short previews for non-file arguments in the audit log (default: `false`); file content is never previewed
 
 Example:
 
@@ -80,17 +83,22 @@ Example:
 $env:ASSISTANT_NAME = "Lab Assistant"
 $env:OLLAMA_MODEL = "qwen2.5:1.5b"
 $env:TOOLS_ENABLED = "true"
+$env:TOOL_ALLOW_WRITES = "1"
 python main.py
 ```
 
 ## Tools
 
-Tools are disabled unless `TOOLS_ENABLED=true`. Only two read-only tools are
-registered:
+Tools are disabled unless `TOOLS_ENABLED=true`. Three tools are registered:
 
 - `list_files(path=".")` - lists immediate entries in a workspace directory.
 - `read_file(path, max_chars=8000)` - reads a UTF-8 text file, truncated to the
   requested character limit and the configured output byte limit.
+- `write_file(path, content, overwrite=false)` - writes UTF-8 text to a file
+  inside `TOOL_WRITE_ROOT`. Writes are disabled unless `TOOL_ALLOW_WRITES=1`.
+  Every write asks the local user for approval. Existing files are only replaced
+  when `overwrite=true` and the user approves the overwrite. Content is limited
+  to 64 KB and is written atomically.
 
 Tool calls use Ollama's native `tools` request field and `tool_calls` response
 messages. The assistant executes at most two tool-call rounds per user request,
@@ -101,13 +109,22 @@ long-term conversation history.
 ## Security
 
 - Tools remain disabled by default and require explicit opt-in.
-- No write, Python execution, or shell tools are registered.
-- Reads are restricted to the `ai-assistant` workspace.
-- Absolute paths, `..` traversal, home paths, and symlink escapes are rejected.
-- Binary files, invalid UTF-8, and oversized files are rejected.
-- Permission decisions come from the local policy and an optional human
-  callback. The model cannot approve its own tool calls.
-- Each tool call is validated and recorded in the audit log.
+- Writes require both `TOOL_ALLOW_WRITES=1` and per-call human approval.
+- The model cannot approve its own tool calls; approval comes only from the
+  local CLI prompt or a configured external callback.
+- No Python execution or shell tools are registered.
+- Reads and writes are restricted to their configured roots inside
+  `ai-assistant`.
+- Absolute paths, `..` traversal, home paths, symlink escapes, Windows reserved
+  names, alternate data streams, and unsafe path characters are rejected.
+- Existing files are never overwritten unless `overwrite=true` and the overwrite
+  is approved.
+- Writes use a temporary file followed by an atomic create or replace, so a
+  failed write does not leave a partial target file.
+- Binary files, invalid UTF-8, and oversized reads are rejected. Write content
+  is limited to 64 KB of UTF-8 text.
+- Each tool call is validated and recorded in the audit log. Audit records hash
+  content and never log file contents or previews of mutating-tool content.
 
 ## How It Works
 
@@ -138,7 +155,15 @@ message.
 
 ## Limitations
 
-- Read-only workspace inspection only. The assistant cannot write files, run
-  Python, execute shell commands, browse the web, or use arbitrary function
-  calling.
+- Workspace inspection and controlled text-file writing only. The assistant
+  cannot run Python, execute shell commands, browse the web, or use arbitrary
+  function calling.
+- `write_file` only creates UTF-8 text files up to 64 KB and requires a local
+  interactive approval. Directories are created only inside the write root.
+- Atomic create without overwrite relies on hard-link support in the workspace
+  filesystem. If the filesystem does not support hard links, the write fails
+  closed.
+- Path checks and writes are separate filesystem operations. A local attacker
+  who can modify the workspace concurrently could attempt a time-of-check /
+  time-of-use race; the assistant itself cannot create symlinks or run code.
 - Requires a local Ollama service and an installed Qwen model.

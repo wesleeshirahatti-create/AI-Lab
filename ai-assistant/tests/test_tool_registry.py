@@ -2,19 +2,30 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from assistant.tools import ToolRegistry, build_default_registry
+from assistant.tools import (
+    ToolRegistry,
+    build_default_registry,
+    build_readonly_registry,
+)
 
 from support import FakeTool
 
 
 class ToolRegistryTests(unittest.TestCase):
-    def test_default_registry_contains_only_read_only_tools(self):
+    def test_default_registry_contains_expected_tools(self):
         registry = build_default_registry()
-        self.assertEqual(registry.names(), ("list_files", "read_file"))
-        self.assertEqual(len(registry), 2)
+        self.assertEqual(
+            registry.names(), ("list_files", "read_file", "write_file")
+        )
+        self.assertEqual(len(registry), 3)
         self.assertIsNotNone(registry.get("read_file"))
-        self.assertIsNone(registry.get("write_file"))
+        self.assertIsNotNone(registry.get("write_file"))
         self.assertIsNone(registry.get("run_python"))
+
+    def test_readonly_registry_excludes_write_tool(self):
+        registry = build_readonly_registry()
+        self.assertEqual(registry.names(), ("list_files", "read_file"))
+        self.assertIsNone(registry.get("write_file"))
 
     def test_register_lookup_and_specs(self):
         registry = ToolRegistry()
@@ -51,7 +62,9 @@ class ToolRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             registry = build_default_registry()
-        self.assertEqual(registry.names(), ("list_files", "read_file"))
+        self.assertEqual(
+            registry.names(), ("list_files", "read_file", "write_file")
+        )
 
 
 if __name__ == "__main__":

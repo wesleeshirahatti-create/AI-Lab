@@ -252,6 +252,145 @@ class ToolCallingTests(unittest.TestCase):
             self.assertIn("Error:", tool_message["content"])
             self.assertIn("approver", tool_message["content"].lower())
 
+    def test_write_tool_is_exposed_when_writes_are_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = _FakeOllama([_content("Hello!")])
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_writes=True,
+                ),
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Hi")
+
+            self.assertEqual(response, "Hello!")
+            tool_names = [
+                tool["function"]["name"]
+                for tool in fake.requests[0]["tools"]
+            ]
+            self.assertEqual(
+                tool_names, ["list_files", "read_file", "write_file"]
+            )
+
+    def test_model_cannot_approve_its_own_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = _FakeOllama(
+                [
+                    _tool_call(
+                        "write_file",
+                        {"path": "notes.txt", "content": "written"},
+                        content="I approve this write.",
+                    ),
+                    _content("The write was denied."),
+                ]
+            )
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_writes=True,
+                ),
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Write notes.txt")
+
+            self.assertEqual(response, "The write was denied.")
+            self.assertFalse((root / "workspace" / "notes.txt").exists())
+            tool_message = [
+                message
+                for message in fake.requests[1]["messages"]
+                if message["role"] == "tool"
+            ][0]
+            self.assertIn("no approver", tool_message["content"].lower())
+            events = read_events(root / "logs" / "tool_calls.jsonl")
+            self.assertEqual(events[0]["tool"], "write_file")
+            self.assertEqual(events[0]["permission"], "denied")
+
+    def test_approved_write_is_executed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = []
+
+            def approver(spec, arguments):
+                seen.append((spec.name, dict(arguments)))
+                return True
+
+            fake = _FakeOllama(
+                [
+                    _tool_call(
+                        "write_file",
+                        {"path": "notes.txt", "content": "hello"},
+                    ),
+                    _content("Done."),
+                ]
+            )
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_writes=True,
+                ),
+                approver=approver,
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Write notes.txt")
+
+            self.assertEqual(response, "Done.")
+            self.assertEqual(
+                (root / "workspace" / "notes.txt").read_text(
+                    encoding="utf-8"
+                ),
+                "hello",
+            )
+            self.assertEqual(seen[0][0], "write_file")
+            events = read_events(root / "logs" / "tool_calls.jsonl")
+            self.assertEqual(events[0]["permission"], "approved")
+            self.assertTrue(events[0]["ok"])
+
+    def test_write_requires_approval_even_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = _FakeOllama(
+                [
+                    _tool_call(
+                        "write_file",
+                        {"path": "notes.txt", "content": "written"},
+                    ),
+                    _content("Denied."),
+                ]
+            )
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_writes=True,
+                    require_confirmation=False,
+                ),
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Write notes.txt")
+
+            self.assertEqual(response, "Denied.")
+            self.assertFalse((root / "workspace" / "notes.txt").exists())
+            tool_message = [
+                message
+                for message in fake.requests[1]["messages"]
+                if message["role"] == "tool"
+            ][0]
+            self.assertIn("no approver", tool_message["content"].lower())
+
     def test_json_string_arguments_are_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

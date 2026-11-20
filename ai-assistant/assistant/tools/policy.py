@@ -210,7 +210,9 @@ class ToolPolicy:
         return None
 
     def approval_required(self, spec: ToolSpec) -> bool:
-        if spec.mutating or spec.requires_python:
+        if spec.mutating:
+            return True
+        if spec.requires_python:
             return self.require_confirmation
         if spec.requires_approval:
             return True

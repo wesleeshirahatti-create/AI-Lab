@@ -128,6 +128,16 @@ class Assistant:
 
         if normalized in {"help", "/help"}:
             if self.policy.tools_enabled:
+                if self._write_tool_available():
+                    return (
+                        f"Type a message to chat with "
+                        f"{self.settings.ollama_model} through Ollama, or use "
+                        "'exit'/'quit' to leave. Tools are enabled: list_files, "
+                        "read_file, and write_file. Every write requires "
+                        "explicit approval, and existing files are only "
+                        "replaced when overwrite=true and approved. The "
+                        "assistant cannot run Python or use a shell."
+                    )
                 return (
                     f"Type a message to chat with {self.settings.ollama_model} "
                     "through Ollama, or use 'exit'/'quit' to leave. Read-only "
@@ -221,17 +231,29 @@ class Assistant:
             "AI assistant running locally through Ollama. Reply in plain text."
         )
         if self.policy.tools_enabled:
-            system_content += (
-                " You may use the provided read-only tools to inspect files in "
-                "the workspace. Permissions are enforced by the application; "
-                "never claim to approve or grant permissions yourself."
-            )
+            if self._write_tool_available():
+                system_content += (
+                    " You may use the provided tools to inspect the workspace "
+                    "and to write files after explicit user approval. "
+                    "Permissions are enforced by the application; never claim "
+                    "to approve or grant permissions yourself."
+                )
+            else:
+                system_content += (
+                    " You may use the provided read-only tools to inspect "
+                    "files in the workspace. Permissions are enforced by the "
+                    "application; never claim to approve or grant permissions "
+                    "yourself."
+                )
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": system_content}
         ]
         messages.extend(self._history)
         return messages
+
+    def _write_tool_available(self) -> bool:
+        return self.policy.allow_writes and "write_file" in self.registry
 
     def _tool_definitions(self) -> list[dict[str, Any]] | None:
         if not self.policy.tools_enabled:

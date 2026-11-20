@@ -259,8 +259,8 @@ class ToolPolicyDecisionTests(unittest.TestCase):
                 tools_enabled=True,
                 require_confirmation=False,
             )
-        self.assertFalse(no_confirmation.approval_required(write_spec))
-        self.assertFalse(
+        self.assertTrue(no_confirmation.approval_required(write_spec))
+        self.assertTrue(
             no_confirmation.approval_required(python_spec)
         )
 

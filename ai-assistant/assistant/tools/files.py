@@ -1,5 +1,6 @@
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,9 @@ from .policy import (
 
 DEFAULT_READ_MAX_CHARS = 8000
 DEFAULT_MAX_CHARS = DEFAULT_READ_MAX_CHARS
+DEFAULT_MAX_WRITE_BYTES = DEFAULT_MAX_FILE_BYTES
+MAX_WRITE_BYTES = DEFAULT_MAX_FILE_BYTES
+MAX_WRITE_PATH_LENGTH = 4096
 
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -25,6 +29,7 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"LPT{index}" for index in range(1, 10)),
 }
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[A-Za-z]:")
+_WINDOWS_FORBIDDEN_CHARACTERS = frozenset('<>:"|?*')
 _PATH_SEPARATOR_PATTERN = re.compile(r"[\\/]+")
 
 
@@ -57,7 +62,7 @@ def _has_windows_reserved_name(path: Path) -> bool:
         if not part or part in {".", ".."}:
             continue
         name = part.split(":", 1)[0].rstrip(" .").upper()
-        stem = name.split(".", 1)[0]
+        stem = name.split(".", 1)[0].rstrip(" .")
         if name in _WINDOWS_RESERVED_NAMES or stem in _WINDOWS_RESERVED_NAMES:
             return True
     return False
@@ -98,6 +103,127 @@ def resolve_workspace_path(root: Path, raw_path: str) -> Path:
         raise UnsafePathError("Path is outside the workspace.") from exc
 
     return resolved
+
+
+def _validate_write_path_components(value: str) -> None:
+    if value.endswith(("/", "\\")):
+        raise UnsafePathError("Path must name a file, not a directory.")
+    if len(value) > MAX_WRITE_PATH_LENGTH:
+        raise UnsafePathError("Path is too long.")
+
+    for part in _PATH_SEPARATOR_PATTERN.split(value):
+        if part == "..":
+            raise UnsafePathError("Path traversal is not allowed.")
+        if part == "":
+            raise UnsafePathError("Path contains an empty component.")
+        if part == ".":
+            continue
+        if part != part.strip():
+            raise UnsafePathError(
+                "Path components must not start or end with whitespace."
+            )
+        if ":" in part:
+            raise UnsafePathError(
+                "Alternate data streams are not allowed."
+            )
+        if part.endswith((".", " ")):
+            raise UnsafePathError(
+                "Path components must not end with a dot or space."
+            )
+        if any(
+            character in _WINDOWS_FORBIDDEN_CHARACTERS
+            or ord(character) < 32
+            for character in part
+        ):
+            raise UnsafePathError("Path contains invalid characters.")
+
+    if _has_windows_reserved_name(Path(value)):
+        raise UnsafePathError("Reserved device paths are not allowed.")
+
+
+def resolve_write_path(root: Path, raw_path: str) -> Path:
+    root = Path(root).resolve()
+    if not isinstance(raw_path, str):
+        raise UnsafePathError("Path must be a string.")
+    if "\x00" in raw_path:
+        raise UnsafePathError("Path contains an invalid character.")
+
+    value = raw_path
+    if not value.strip():
+        raise UnsafePathError("Path must not be empty.")
+    if value != value.strip():
+        raise UnsafePathError(
+            "Path must not start or end with whitespace."
+        )
+    if value.startswith(("~", "/", "\\")) or _WINDOWS_DRIVE_PATTERN.match(
+        value
+    ):
+        raise UnsafePathError("Absolute or home paths are not allowed.")
+    if ":" in value:
+        raise UnsafePathError("Alternate data streams are not allowed.")
+
+    candidate = Path(value)
+    if candidate.is_absolute() or candidate.drive:
+        raise UnsafePathError("Absolute paths are not allowed.")
+    if any(
+        part == ".."
+        for part in _PATH_SEPARATOR_PATTERN.split(value)
+    ) or any(part == ".." for part in candidate.parts):
+        raise UnsafePathError("Path traversal is not allowed.")
+
+    _validate_write_path_components(value)
+
+    try:
+        resolved = (root / candidate).resolve()
+    except (OSError, RuntimeError) as exc:
+        raise UnsafePathError("Path could not be resolved.") from exc
+
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise UnsafePathError("Path is outside the workspace.") from exc
+    if resolved == root:
+        raise UnsafePathError("Path must name a file.")
+
+    return resolved
+
+
+def _atomic_write(target: Path, data: bytes, *, overwrite: bool) -> None:
+    parent = target.parent
+    temp_path: Path | None = None
+    descriptor = -1
+
+    try:
+        descriptor, temp_name = tempfile.mkstemp(
+            prefix=".write-",
+            suffix=".tmp",
+            dir=str(parent),
+        )
+        temp_path = Path(temp_name)
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if overwrite:
+            os.replace(temp_path, target)
+            temp_path = None
+        else:
+            os.link(temp_path, target)
+    finally:
+        if descriptor != -1:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temp_path is not None:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 def _looks_binary(data: bytes) -> bool:
@@ -403,17 +529,207 @@ class ReadFileTool:
         )
 
 
+class WriteFileTool:
+    spec = ToolSpec(
+        name="write_file",
+        description=(
+            "Write a UTF-8 text file inside the assistant workspace. "
+            "Each write requires explicit user approval. Existing files are "
+            "only replaced when overwrite=true and the overwrite is approved."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "File path relative to the assistant workspace."
+                    ),
+                },
+                "content": {
+                    "type": "string",
+                    "description": "UTF-8 text to write.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": (
+                        "Replace an existing file. Requires explicit "
+                        "overwrite approval."
+                    ),
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        mutating=True,
+        requires_approval=True,
+    )
+
+    def __init__(
+        self,
+        root: Path | str | ToolPolicy | None = None,
+        *,
+        policy: ToolPolicy | None = None,
+        max_file_bytes: int | None = None,
+    ) -> None:
+        if isinstance(root, ToolPolicy):
+            policy = root
+            root = None
+        if policy is not None:
+            root = root or policy.write_root
+            if max_file_bytes is None:
+                max_file_bytes = policy.max_file_bytes
+
+        self.root = Path(root or (PROJECT_ROOT / "workspace")).resolve()
+        limit = (
+            max_file_bytes
+            if max_file_bytes is not None
+            else DEFAULT_MAX_WRITE_BYTES
+        )
+        self.max_file_bytes = max(1, min(MAX_WRITE_BYTES, int(limit)))
+
+    def validate(self, arguments: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, Mapping):
+            raise ToolValidationError("Tool arguments must be an object.")
+
+        unknown = set(arguments) - {"path", "content", "overwrite"}
+        if unknown:
+            raise ToolValidationError(
+                "Unknown argument(s): " + ", ".join(sorted(map(str, unknown)))
+            )
+
+        raw_path = arguments.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ToolValidationError("'path' must be a non-empty string.")
+        if raw_path != raw_path.strip():
+            raise ToolValidationError(
+                "'path' must not start or end with whitespace."
+            )
+
+        content = arguments.get("content")
+        if not isinstance(content, str):
+            raise ToolValidationError("'content' must be a string.")
+        try:
+            encoded = content.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ToolValidationError(
+                "'content' must be valid UTF-8 text."
+            ) from exc
+        if len(encoded) > self.max_file_bytes:
+            raise ToolValidationError(
+                f"Content is too large ({len(encoded)} bytes; "
+                f"limit is {self.max_file_bytes})."
+            )
+
+        overwrite = arguments.get("overwrite", False)
+        if not isinstance(overwrite, bool):
+            raise ToolValidationError("'overwrite' must be a boolean.")
+
+        resolve_write_path(self.root, raw_path)
+        return {
+            "path": raw_path,
+            "content": content,
+            "overwrite": overwrite,
+        }
+
+    def execute(self, arguments: Mapping[str, Any]) -> ToolResult:
+        try:
+            validated = self.validate(arguments)
+        except ToolValidationError as exc:
+            return ToolResult.failure(self.spec.name, str(exc))
+
+        try:
+            data = validated["content"].encode("utf-8")
+        except UnicodeEncodeError:
+            return ToolResult.failure(
+                self.spec.name, "'content' must be valid UTF-8 text."
+            )
+        if len(data) > self.max_file_bytes:
+            return ToolResult.failure(
+                self.spec.name,
+                f"Content is too large ({len(data)} bytes; "
+                f"limit is {self.max_file_bytes}).",
+            )
+
+        try:
+            target = resolve_write_path(self.root, validated["path"])
+        except UnsafePathError as exc:
+            return ToolResult.failure(self.spec.name, str(exc))
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target = resolve_write_path(self.root, validated["path"])
+        except UnsafePathError as exc:
+            return ToolResult.failure(self.spec.name, str(exc))
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            return ToolResult.failure(
+                self.spec.name, f"Could not create directory: {detail}"
+            )
+
+        if target.exists():
+            if target.is_dir():
+                return ToolResult.failure(
+                    self.spec.name, "Path is a directory, not a file."
+                )
+            if not target.is_file():
+                return ToolResult.failure(
+                    self.spec.name, "Path is not a regular file."
+                )
+            if not validated["overwrite"]:
+                return ToolResult.failure(
+                    self.spec.name,
+                    "File already exists; set overwrite=true to replace it.",
+                )
+            existed = True
+        else:
+            existed = False
+
+        try:
+            _atomic_write(
+                target, data, overwrite=validated["overwrite"]
+            )
+        except FileExistsError:
+            return ToolResult.failure(
+                self.spec.name,
+                "File already exists; set overwrite=true to replace it.",
+            )
+        except OSError as exc:
+            detail = exc.strerror or str(exc)
+            return ToolResult.failure(
+                self.spec.name, f"Could not write file: {detail}"
+            )
+
+        display = _display_path(self.root, target)
+        return ToolResult.success(
+            self.spec.name,
+            f"Wrote {display} ({len(data)} bytes).",
+            {
+                "path": display,
+                "bytes": len(data),
+                "created": not existed,
+                "overwritten": existed and validated["overwrite"],
+            },
+        )
+
+
 ListFiles = ListFilesTool
 ReadFile = ReadFileTool
+WriteFile = WriteFileTool
 
 
 __all__ = [
     "DEFAULT_MAX_CHARS",
+    "DEFAULT_MAX_WRITE_BYTES",
     "DEFAULT_READ_MAX_CHARS",
     "ListFiles",
     "ListFilesTool",
+    "MAX_WRITE_BYTES",
     "ReadFile",
     "ReadFileTool",
     "UnsafePathError",
+    "WriteFile",
+    "WriteFileTool",
     "resolve_workspace_path",
+    "resolve_write_path",
 ]
