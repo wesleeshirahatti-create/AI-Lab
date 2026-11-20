@@ -32,6 +32,20 @@ class AuditLogger:
                 sort_keys=True,
                 default=str,
             )
+            line.encode("utf-8")
+        except UnicodeEncodeError:
+            try:
+                line = json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                )
+            except (TypeError, ValueError) as exc:
+                self.last_error = (
+                    f"Could not serialize audit event: {exc}"
+                )
+                return False
         except (TypeError, ValueError) as exc:
             self.last_error = f"Could not serialize audit event: {exc}"
             return False
@@ -44,7 +58,7 @@ class AuditLogger:
                 ) as handle:
                     handle.write(line + "\n")
                     handle.flush()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             self.last_error = f"Could not append audit event: {exc}"
             return False
 

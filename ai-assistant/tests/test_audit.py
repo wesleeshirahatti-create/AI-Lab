@@ -72,6 +72,17 @@ class AuditLoggerTests(unittest.TestCase):
             )
             self.assertIsInstance(event["path"], str)
 
+    def test_lone_surrogate_is_escaped_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "audit.jsonl"
+            logger = AuditLogger(path)
+
+            self.assertTrue(logger.log({"value": "\ud800"}))
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("\\ud800", text)
+            self.assertEqual(json.loads(text)["value"], "\ud800")
+            self.assertIsNone(logger.last_error)
+
 
 if __name__ == "__main__":
     unittest.main()

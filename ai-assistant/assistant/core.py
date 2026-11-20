@@ -127,28 +127,51 @@ class Assistant:
         normalized = message.lower()
 
         if normalized in {"help", "/help"}:
-            if self.policy.tools_enabled:
-                if self._write_tool_available():
-                    return (
-                        f"Type a message to chat with "
-                        f"{self.settings.ollama_model} through Ollama, or use "
-                        "'exit'/'quit' to leave. Tools are enabled: list_files, "
-                        "read_file, and write_file. Every write requires "
-                        "explicit approval, and existing files are only "
-                        "replaced when overwrite=true and approved. The "
-                        "assistant cannot run Python or use a shell."
-                    )
+            if not self.policy.tools_enabled:
                 return (
-                    f"Type a message to chat with {self.settings.ollama_model} "
-                    "through Ollama, or use 'exit'/'quit' to leave. Read-only "
-                    "tools are enabled: list_files and read_file. The assistant "
-                    "cannot write files, run Python, or use a shell."
+                    f"Type a message to chat with "
+                    f"{self.settings.ollama_model} through Ollama, or use "
+                    "'exit'/'quit' to leave. This assistant can chat only; it "
+                    "does not use external tools."
                 )
-            return (
-                f"Type a message to chat with {self.settings.ollama_model} through "
-                "Ollama, or use 'exit'/'quit' to leave. This assistant can chat "
-                "only; it does not use external tools."
-            )
+
+            available = self._available_tool_names()
+            if not available:
+                return (
+                    f"Type a message to chat with "
+                    f"{self.settings.ollama_model} through Ollama, or use "
+                    "'exit'/'quit' to leave. Tools are enabled, but no tools "
+                    "are permitted by the current policy."
+                )
+
+            parts = [
+                f"Type a message to chat with "
+                f"{self.settings.ollama_model} through Ollama, or use "
+                f"'exit'/'quit' to leave. Tools are enabled: "
+                f"{', '.join(available)}."
+            ]
+            if self._write_tool_available():
+                parts.append(
+                    "Every write requires explicit approval, and existing "
+                    "files are only replaced when overwrite=true and approved."
+                )
+            if self._python_tool_available():
+                parts.append(
+                    "Every run_python call requires explicit approval. Python "
+                    "execution is not a security sandbox and can access files, "
+                    "the network, and other processes with your permissions. "
+                    "There is no separate shell tool."
+                )
+            else:
+                parts.append(
+                    "The assistant cannot run Python or use a shell."
+                )
+            if (
+                not self._write_tool_available()
+                and not self._python_tool_available()
+            ):
+                parts.append("The assistant cannot write files.")
+            return " ".join(parts)
 
         return self._query_ollama()
 
@@ -231,19 +254,33 @@ class Assistant:
             "AI assistant running locally through Ollama. Reply in plain text."
         )
         if self.policy.tools_enabled:
-            if self._write_tool_available():
+            available = self._available_tool_names()
+            if available:
+                capabilities = ["inspect files in the workspace"]
+                if self._write_tool_available():
+                    capabilities.append(
+                        "write files after explicit user approval"
+                    )
+                if self._python_tool_available():
+                    capabilities.append(
+                        "run Python code after explicit user approval"
+                    )
                 system_content += (
-                    " You may use the provided tools to inspect the workspace "
-                    "and to write files after explicit user approval. "
-                    "Permissions are enforced by the application; never claim "
-                    "to approve or grant permissions yourself."
+                    " You may use the provided tools to "
+                    + ", ".join(capabilities)
+                    + ". Permissions are enforced by the application; never "
+                    "claim to approve or grant permissions yourself."
                 )
+                if self._python_tool_available():
+                    system_content += (
+                        " run_python executes with the current user's "
+                        "permissions and is not a security sandbox; it can "
+                        "access files, the network, and other processes."
+                    )
             else:
                 system_content += (
-                    " You may use the provided read-only tools to inspect "
-                    "files in the workspace. Permissions are enforced by the "
-                    "application; never claim to approve or grant permissions "
-                    "yourself."
+                    " Tools are enabled, but no tools are permitted by the "
+                    "current policy."
                 )
 
         messages: list[dict[str, Any]] = [
@@ -254,6 +291,16 @@ class Assistant:
 
     def _write_tool_available(self) -> bool:
         return self.policy.allow_writes and "write_file" in self.registry
+
+    def _python_tool_available(self) -> bool:
+        return self.policy.allow_python and "run_python" in self.registry
+
+    def _available_tool_names(self) -> tuple[str, ...]:
+        return tuple(
+            spec.name
+            for spec in self.registry.specs()
+            if self.policy.denial_reason(spec) is None
+        )
 
     def _tool_definitions(self) -> list[dict[str, Any]] | None:
         if not self.policy.tools_enabled:

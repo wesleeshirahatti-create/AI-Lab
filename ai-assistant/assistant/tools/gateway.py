@@ -27,6 +27,11 @@ _SENSITIVE_ARGUMENT_NAMES = {
 }
 
 
+def _safe_audit_text(value: str, limit: int | None = None) -> str:
+    text = value if limit is None else value[:limit]
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 class ToolGateway:
     def __init__(
         self,
@@ -196,6 +201,34 @@ class ToolGateway:
                 )
             permission = "approved"
 
+        if tool.spec.requires_python:
+            preflight_event = dict(event)
+            preflight_event.update(
+                {
+                    "phase": "preflight",
+                    "permission": permission,
+                }
+            )
+            audit_ok = False
+            try:
+                if self.audit_logger.enabled:
+                    audit_ok = bool(
+                        self.audit_logger.log(preflight_event)
+                    )
+            except Exception:
+                audit_ok = False
+            if not audit_ok:
+                return self._finish(
+                    event,
+                    ToolResult.failure(
+                        tool_name,
+                        "Audit logging failed; Python execution denied.",
+                    ),
+                    "denied",
+                    started,
+                    error_type="AuditError",
+                )
+
         try:
             result = tool.execute(dict(normalized_validated))
         except ToolExecutionError as exc:
@@ -247,8 +280,10 @@ class ToolGateway:
                 "duration_ms": round(
                     (time.perf_counter() - started) * 1000, 2
                 ),
-                "output_bytes": len(result.output.encode("utf-8")),
-                "error": result.error[:500],
+                "output_bytes": len(
+                    result.output.encode("utf-8", "surrogatepass")
+                ),
+                "error": _safe_audit_text(result.error, 500),
                 "metadata": self._summarize_arguments(
                     dict(result.metadata),
                     allow_content_preview=False,
@@ -258,7 +293,9 @@ class ToolGateway:
         if error_type is not None:
             event["error_type"] = error_type
         if error_detail:
-            event["error_detail"] = str(error_detail)[:500]
+            event["error_detail"] = _safe_audit_text(
+                str(error_detail), 500
+            )
 
         try:
             self.audit_logger.log(event)
@@ -274,14 +311,14 @@ class ToolGateway:
     ) -> dict[str, Any]:
         summary: dict[str, Any] = {}
         for key, value in arguments.items():
-            name = str(key)[:100]
+            name = _safe_audit_text(str(key), 100)
             if name.lower() in _SENSITIVE_ARGUMENT_NAMES:
                 summary[name] = self._content_summary(
                     value,
                     allow_preview=allow_content_preview,
                 )
             elif isinstance(value, str):
-                summary[name] = value[:200]
+                summary[name] = _safe_audit_text(value, 200)
             elif isinstance(value, (int, float, bool)) or value is None:
                 summary[name] = value
             else:
@@ -296,13 +333,13 @@ class ToolGateway:
     ) -> dict[str, Any]:
         if not isinstance(value, str):
             return {"type": type(value).__name__}
-        encoded = value.encode("utf-8")
+        encoded = value.encode("utf-8", "surrogatepass")
         summary = {
             "sha256": hashlib.sha256(encoded).hexdigest(),
             "bytes": len(encoded),
         }
         if allow_preview and self.policy.log_content:
-            summary["preview"] = value[:200]
+            summary["preview"] = _safe_audit_text(value, 200)
         return summary
 
 

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from assistant.tools import (
     AuditLogger,
+    RunPythonTool,
     ToolExecutionError,
     ToolGateway,
     ToolRegistry,
@@ -274,7 +275,108 @@ class ToolGatewayApprovalTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(tool.calls, 1)
             events = read_events(audit.path)
+            self.assertEqual(len(events), 2)
             self.assertEqual(events[0]["permission"], "approved")
+            self.assertEqual(events[0]["phase"], "preflight")
+            self.assertEqual(events[1]["permission"], "approved")
+            self.assertNotIn("phase", events[1])
+
+    def test_python_preflight_audit_hashes_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = FakeTool(
+                "run_python", mutating=True, requires_python=True
+            )
+            gateway, audit = _gateway(
+                root,
+                tool,
+                approver=lambda spec, arguments: True,
+            )
+
+            result = gateway.dispatch(
+                "run_python",
+                {"code": "print('super-secret')"},
+                request_id="req-python",
+            )
+
+            self.assertTrue(result.ok)
+            events = read_events(audit.path)
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0]["request_id"], "req-python")
+            self.assertEqual(events[0]["phase"], "preflight")
+            self.assertIn("sha256", events[0]["arguments"]["code"])
+            self.assertIn("bytes", events[0]["arguments"]["code"])
+            log_text = audit.path.read_text(encoding="utf-8")
+            self.assertNotIn("super-secret", log_text)
+
+    def test_python_requires_approval_when_confirmation_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = FakeTool(
+                "run_python", mutating=True, requires_python=True
+            )
+            gateway, _ = _gateway(
+                root,
+                tool,
+                policy=make_policy(root, require_confirmation=False),
+            )
+
+            result = gateway.dispatch("run_python", {"code": "print(1)"})
+
+            self.assertFalse(result.ok)
+            self.assertIn("no approver", result.error.lower())
+            self.assertEqual(tool.calls, 0)
+
+    def test_python_is_denied_when_audit_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = FakeTool(
+                "run_python", mutating=True, requires_python=True
+            )
+            registry = ToolRegistry()
+            registry.register(tool)
+            gateway = ToolGateway(
+                make_policy(root),
+                registry,
+                AuditLogger(root / "audit.jsonl", enabled=False),
+                approver=lambda spec, arguments: True,
+            )
+
+            result = gateway.dispatch("run_python", {"code": "print(1)"})
+
+            self.assertFalse(result.ok)
+            self.assertEqual(
+                result.error,
+                "Audit logging failed; Python execution denied.",
+            )
+            self.assertEqual(tool.calls, 0)
+            self.assertFalse((root / "audit.jsonl").exists())
+
+    def test_python_is_denied_when_preflight_audit_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = FakeTool(
+                "run_python", mutating=True, requires_python=True
+            )
+            registry = ToolRegistry()
+            registry.register(tool)
+            audit_path = root / "audit-as-directory"
+            audit_path.mkdir()
+            gateway = ToolGateway(
+                make_policy(root),
+                registry,
+                AuditLogger(audit_path),
+                approver=lambda spec, arguments: True,
+            )
+
+            result = gateway.dispatch("run_python", {"code": "print(1)"})
+
+            self.assertFalse(result.ok)
+            self.assertEqual(
+                result.error,
+                "Audit logging failed; Python execution denied.",
+            )
+            self.assertEqual(tool.calls, 0)
 
 
 class ToolGatewayExecutionTests(unittest.TestCase):
@@ -417,6 +519,51 @@ class ToolGatewayAuditPrivacyTests(unittest.TestCase):
             self.assertNotIn("secret metadata", log_text)
             event = read_events(audit.path)[0]
             self.assertIn("sha256", event["metadata"]["content"])
+
+    def test_lone_surrogate_code_is_rejected_and_audited(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = RunPythonTool(root / "python")
+            gateway, audit = _gateway(
+                root,
+                tool,
+                approver=lambda spec, arguments: True,
+            )
+
+            result = gateway.dispatch("run_python", {"code": "\ud800"})
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error, "Invalid tool arguments.")
+            events = read_events(audit.path)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["permission"], "invalid_arguments")
+            summary = events[0]["arguments"]["code"]
+            self.assertIn("sha256", summary)
+            self.assertEqual(summary["bytes"], 3)
+            self.assertNotIn(
+                "\ud800",
+                audit.path.read_text(encoding="utf-8"),
+            )
+
+    def test_lone_surrogate_preview_is_escaped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = FakeTool("read_file")
+            gateway, audit = _gateway(
+                root,
+                tool,
+                policy=make_policy(root, log_content=True),
+            )
+
+            result = gateway.dispatch("read_file", {"content": "\ud800"})
+
+            self.assertTrue(result.ok)
+            event = read_events(audit.path)[0]
+            self.assertEqual(
+                event["arguments"]["content"]["preview"],
+                "\\ud800",
+            )
+            self.assertIn("sha256", event["arguments"]["content"])
 
 
 if __name__ == "__main__":

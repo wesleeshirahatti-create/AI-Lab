@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from assistant.tools import (
+    ToolPolicy,
     ToolRegistry,
     build_default_registry,
     build_readonly_registry,
@@ -15,17 +16,37 @@ class ToolRegistryTests(unittest.TestCase):
     def test_default_registry_contains_expected_tools(self):
         registry = build_default_registry()
         self.assertEqual(
-            registry.names(), ("list_files", "read_file", "write_file")
+            registry.names(),
+            ("list_files", "read_file", "run_python", "write_file"),
         )
-        self.assertEqual(len(registry), 3)
+        self.assertEqual(len(registry), 4)
         self.assertIsNotNone(registry.get("read_file"))
+        self.assertIsNotNone(registry.get("run_python"))
         self.assertIsNotNone(registry.get("write_file"))
-        self.assertIsNone(registry.get("run_python"))
 
-    def test_readonly_registry_excludes_write_tool(self):
+    def test_readonly_registry_excludes_mutating_tools(self):
         registry = build_readonly_registry()
         self.assertEqual(registry.names(), ("list_files", "read_file"))
         self.assertIsNone(registry.get("write_file"))
+        self.assertIsNone(registry.get("run_python"))
+
+    def test_python_tool_can_be_excluded(self):
+        registry = build_default_registry(include_python=False)
+        self.assertEqual(
+            registry.names(), ("list_files", "read_file", "write_file")
+        )
+
+    def test_python_tool_uses_policy_workdir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolPolicy(
+                project_root=Path(tmp),
+                tools_enabled=True,
+                allow_python=True,
+            )
+            registry = build_default_registry(policy=policy)
+            tool = registry.get("run_python")
+        self.assertIsNotNone(tool)
+        self.assertEqual(tool.workdir, policy.python_workdir)
 
     def test_register_lookup_and_specs(self):
         registry = ToolRegistry()
@@ -63,7 +84,8 @@ class ToolRegistryTests(unittest.TestCase):
             )
             registry = build_default_registry()
         self.assertEqual(
-            registry.names(), ("list_files", "read_file", "write_file")
+            registry.names(),
+            ("list_files", "read_file", "run_python", "write_file"),
         )
 
 

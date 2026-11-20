@@ -96,6 +96,66 @@ class CliApprovalTests(unittest.TestCase):
             self.assertTrue(approved)
             self.assertIn("read_file", output.getvalue())
 
+    def test_python_approval_displays_full_escaped_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            policy = make_policy(root)
+            approver = _build_approver(policy)
+            code = (
+                "print('hello')\n"
+                "\x1b[31mred\x1b[0m\n"
+                "\u202eabc\n"
+                "last = 1\n"
+            )
+            output = io.StringIO()
+
+            with patch("builtins.input", return_value="y"):
+                with redirect_stdout(output):
+                    approved = approver(
+                        FakeTool(
+                            "run_python",
+                            mutating=True,
+                            requires_python=True,
+                        ).spec,
+                        {"code": code, "timeout_seconds": 3},
+                    )
+
+            self.assertTrue(approved)
+            text = output.getvalue()
+            self.assertIn("Approval required: run_python", text)
+            self.assertIn(
+                f"Code: {len(code.encode('utf-8'))} bytes", text
+            )
+            self.assertIn("Timeout: 3 seconds", text)
+            self.assertIn(
+                f"Working directory: {policy.python_workdir}", text
+            )
+            self.assertIn("not a security sandbox", text)
+            self.assertIn("1 | print('hello')", text)
+            self.assertIn("2 | \\x1b[31mred\\x1b[0m", text)
+            self.assertIn("3 | \\u202eabc", text)
+            self.assertIn("4 | last = 1", text)
+            self.assertNotIn("\x1b", text)
+            self.assertNotIn("\u202e", text)
+
+    def test_python_approval_is_denied_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = make_policy(Path(tmp))
+            approver = _build_approver(policy)
+
+            with patch("builtins.input", return_value=""):
+                with redirect_stdout(io.StringIO()):
+                    approved = approver(
+                        FakeTool(
+                            "run_python",
+                            mutating=True,
+                            requires_python=True,
+                        ).spec,
+                        {"code": "print('hello')"},
+                    )
+
+            self.assertFalse(approved)
+
     def test_approval_fails_closed_on_eof(self):
         with tempfile.TemporaryDirectory() as tmp:
             policy = make_policy(Path(tmp))

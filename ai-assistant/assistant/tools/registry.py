@@ -4,6 +4,7 @@ from pathlib import Path
 from .base import Tool, ToolSpec
 from .files import ListFilesTool, ReadFileTool, WriteFileTool
 from .policy import ToolPolicy
+from .python_exec import RunPythonTool
 
 
 class ToolRegistry:
@@ -43,10 +44,14 @@ def build_default_registry(
     policy: ToolPolicy | None = None,
     read_root: Path | str | None = None,
     write_root: Path | str | None = None,
+    python_workdir: Path | str | None = None,
     max_file_bytes: int | None = None,
     max_output_bytes: int | None = None,
+    max_code_bytes: int | None = None,
     max_list_entries: int | None = None,
+    python_timeout_seconds: int | None = None,
     include_writes: bool = True,
+    include_python: bool = True,
 ) -> ToolRegistry:
     if isinstance(root, ToolPolicy):
         policy = root
@@ -58,16 +63,28 @@ def build_default_registry(
             base_root = policy.read_root
         if write_root is None:
             write_root = policy.write_root
+        if python_workdir is None:
+            python_workdir = policy.python_workdir
         if max_file_bytes is None:
             max_file_bytes = policy.max_file_bytes
         if max_output_bytes is None:
             max_output_bytes = policy.max_output_bytes
+        if max_code_bytes is None:
+            max_code_bytes = policy.max_code_bytes
         if max_list_entries is None:
             max_list_entries = policy.max_list_entries
+        if python_timeout_seconds is None:
+            python_timeout_seconds = policy.python_timeout_seconds
 
     if write_root is None:
         write_root = (
             Path(base_root) / "workspace"
+            if base_root is not None
+            else None
+        )
+    if python_workdir is None:
+        python_workdir = (
+            Path(base_root) / "workspace" / "python"
             if base_root is not None
             else None
         )
@@ -94,6 +111,15 @@ def build_default_registry(
                 max_file_bytes=max_file_bytes,
             )
         )
+    if include_python:
+        registry.register(
+            RunPythonTool(
+                python_workdir=python_workdir,
+                max_code_bytes=max_code_bytes,
+                max_output_bytes=max_output_bytes,
+                timeout_seconds=python_timeout_seconds,
+            )
+        )
     return registry
 
 
@@ -114,6 +140,7 @@ def build_readonly_registry(
         max_output_bytes=max_output_bytes,
         max_list_entries=max_list_entries,
         include_writes=False,
+        include_python=False,
     )
 
 

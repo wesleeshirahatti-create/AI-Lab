@@ -1,3 +1,5 @@
+import unicodedata
+
 from assistant import Assistant
 from assistant.tools import (
     ToolPolicy,
@@ -13,6 +15,32 @@ def _ask(prompt: str) -> bool:
     except (EOFError, KeyboardInterrupt):
         return False
     return answer in {"y", "yes"}
+
+
+def _escape_code_line(line: str) -> str:
+    escaped: list[str] = []
+    for character in line:
+        category = unicodedata.category(character)
+        if character == "\t":
+            escaped.append("\\t")
+        elif category.startswith("C") or category in {"Zl", "Zp"}:
+            code = ord(character)
+            if code <= 0xFF:
+                escaped.append(f"\\x{code:02x}")
+            elif code <= 0xFFFF:
+                escaped.append(f"\\u{code:04x}")
+            else:
+                escaped.append(f"\\U{code:08x}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
+
+
+def _print_python_code(code: str) -> None:
+    lines = code.splitlines()
+    width = len(str(max(1, len(lines))))
+    for number, line in enumerate(lines, 1):
+        print(f"  {number:>{width}} | {_escape_code_line(line)}")
 
 
 def _build_approver(policy: ToolPolicy):
@@ -46,6 +74,31 @@ def _build_approver(policy: ToolPolicy):
                     ):
                         return False
             return True
+
+        if spec.name == "run_python":
+            code = arguments.get("code", "")
+            if not isinstance(code, str):
+                code = ""
+            size = len(code.encode("utf-8"))
+            timeout = arguments.get(
+                "timeout_seconds", policy.python_timeout_seconds
+            )
+            if isinstance(timeout, bool) or not isinstance(timeout, int):
+                timeout = policy.python_timeout_seconds
+            timeout = max(1, min(policy.python_timeout_seconds, timeout))
+
+            print("\nApproval required: run_python")
+            print(f"  Code: {size} bytes")
+            print(f"  Timeout: {timeout} seconds")
+            print(f"  Working directory: {policy.python_workdir}")
+            print("  Each run uses a new temporary subdirectory.")
+            print(
+                "  WARNING: Python runs with your user permissions and is "
+                "not a security sandbox."
+            )
+            print("  Code:")
+            _print_python_code(code)
+            return _ask("Approve this Python execution? [y/N] ")
 
         print(f"\nApproval required: {spec.name}")
         return _ask("Approve this tool call? [y/N] ")

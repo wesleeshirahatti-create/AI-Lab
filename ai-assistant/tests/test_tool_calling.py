@@ -277,6 +277,147 @@ class ToolCallingTests(unittest.TestCase):
                 tool_names, ["list_files", "read_file", "write_file"]
             )
 
+    def test_python_tool_is_exposed_when_python_is_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = _FakeOllama([_content("Hello!")])
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_python=True,
+                ),
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Hi")
+
+            self.assertEqual(response, "Hello!")
+            tool_names = [
+                tool["function"]["name"]
+                for tool in fake.requests[0]["tools"]
+            ]
+            self.assertEqual(
+                tool_names,
+                ["list_files", "read_file", "run_python"],
+            )
+            system_prompt = fake.requests[0]["messages"][0]["content"]
+            self.assertIn("run_python", system_prompt)
+            self.assertIn("not a security sandbox", system_prompt)
+
+    def test_python_help_mentions_approval_and_sandbox_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_python=True,
+                ),
+            )
+
+            response = assistant.reply("help")
+
+            self.assertIn("run_python", response)
+            self.assertIn("approval", response.lower())
+            self.assertIn("not a security sandbox", response)
+            self.assertNotIn("cannot run Python", response)
+
+    def test_help_reports_when_python_is_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            assistant = _assistant(root)
+
+            response = assistant.reply("help")
+
+            self.assertIn("cannot run Python", response)
+            self.assertNotIn("run_python", response)
+
+    def test_model_cannot_approve_its_own_python_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = _FakeOllama(
+                [
+                    _tool_call(
+                        "run_python",
+                        {"code": "print('should not run')"},
+                        content="I approve this execution.",
+                    ),
+                    _content("The execution was denied."),
+                ]
+            )
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_python=True,
+                    require_confirmation=False,
+                ),
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Run Python")
+
+            self.assertEqual(response, "The execution was denied.")
+            tool_message = [
+                message
+                for message in fake.requests[1]["messages"]
+                if message["role"] == "tool"
+            ][0]
+            self.assertIn("no approver", tool_message["content"].lower())
+            events = read_events(root / "logs" / "tool_calls.jsonl")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["tool"], "run_python")
+            self.assertEqual(events[0]["permission"], "denied")
+
+    def test_approved_python_execution_is_returned_to_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = []
+
+            def approver(spec, arguments):
+                seen.append((spec.name, dict(arguments)))
+                return True
+
+            fake = _FakeOllama(
+                [
+                    _tool_call(
+                        "run_python",
+                        {"code": "print('hello from python')"},
+                    ),
+                    _content("Done."),
+                ]
+            )
+            assistant = _assistant(
+                root,
+                policy=ToolPolicy(
+                    project_root=root,
+                    tools_enabled=True,
+                    allow_python=True,
+                ),
+                approver=approver,
+            )
+
+            with patch("assistant.core.urllib.request.urlopen", fake):
+                response = assistant.reply("Run Python")
+
+            self.assertEqual(response, "Done.")
+            self.assertEqual(seen[0][0], "run_python")
+            tool_message = [
+                message
+                for message in fake.requests[1]["messages"]
+                if message["role"] == "tool"
+            ][0]
+            self.assertIn("hello from python", tool_message["content"])
+            events = read_events(root / "logs" / "tool_calls.jsonl")
+            self.assertEqual(len(events), 2)
+            self.assertEqual(events[0]["phase"], "preflight")
+            self.assertEqual(events[1]["tool"], "run_python")
+            self.assertTrue(events[1]["ok"])
+
     def test_model_cannot_approve_its_own_write(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

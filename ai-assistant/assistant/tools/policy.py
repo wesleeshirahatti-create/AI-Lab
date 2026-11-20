@@ -8,10 +8,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_MAX_FILE_BYTES = 64 * 1024
 DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024
+DEFAULT_MAX_PYTHON_OUTPUT_BYTES = 8 * 1024
 DEFAULT_MAX_CODE_BYTES = 8 * 1024
 DEFAULT_MAX_LIST_ENTRIES = 200
 DEFAULT_PYTHON_TIMEOUT_SECONDS = 10
 DEFAULT_MAX_TOOL_ROUNDS = 2
+DEFAULT_PYTHON_PROCESS_MEMORY_BYTES = 256 * 1024 * 1024
+DEFAULT_PYTHON_JOB_MEMORY_BYTES = 512 * 1024 * 1024
+DEFAULT_PYTHON_CPU_TIME_SECONDS = 10
+DEFAULT_PYTHON_MAX_PROCESSES = 8
+MIN_PYTHON_PROCESS_MEMORY_BYTES = 16 * 1024 * 1024
+MAX_PYTHON_PROCESS_MEMORY_BYTES = 1024 * 1024 * 1024
+MIN_PYTHON_JOB_MEMORY_BYTES = 32 * 1024 * 1024
+MAX_PYTHON_JOB_MEMORY_BYTES = 2 * 1024 * 1024 * 1024
+MIN_PYTHON_CPU_TIME_SECONDS = 1
+MAX_PYTHON_CPU_TIME_SECONDS = 60
+MIN_PYTHON_MAX_PROCESSES = 1
+MAX_PYTHON_MAX_PROCESSES = 64
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
 _FALSE_VALUES = {"0", "false", "no", "off"}
@@ -59,6 +72,7 @@ class ToolPolicy:
     project_root: Path = PROJECT_ROOT
     read_root: Path | None = None
     write_root: Path | None = None
+    python_workdir: Path | None = None
     log_path: Path | None = None
     tools_enabled: bool = False
     allow_writes: bool = False
@@ -71,6 +85,10 @@ class ToolPolicy:
     max_code_bytes: int = DEFAULT_MAX_CODE_BYTES
     max_list_entries: int = DEFAULT_MAX_LIST_ENTRIES
     python_timeout_seconds: int = DEFAULT_PYTHON_TIMEOUT_SECONDS
+    python_process_memory_bytes: int = DEFAULT_PYTHON_PROCESS_MEMORY_BYTES
+    python_job_memory_bytes: int = DEFAULT_PYTHON_JOB_MEMORY_BYTES
+    python_cpu_time_seconds: int = DEFAULT_PYTHON_CPU_TIME_SECONDS
+    python_max_processes: int = DEFAULT_PYTHON_MAX_PROCESSES
     max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS
 
     def __post_init__(self) -> None:
@@ -83,6 +101,11 @@ class ToolPolicy:
             if self.write_root is not None
             else root / "workspace"
         )
+        python_workdir = (
+            Path(self.python_workdir).resolve()
+            if self.python_workdir is not None
+            else root / "workspace" / "python"
+        )
         log_path = (
             Path(self.log_path).resolve()
             if self.log_path is not None
@@ -92,6 +115,7 @@ class ToolPolicy:
         for label, path in (
             ("read_root", read_root),
             ("write_root", write_root),
+            ("python_workdir", python_workdir),
             ("log_path", log_path),
         ):
             try:
@@ -102,6 +126,7 @@ class ToolPolicy:
         object.__setattr__(self, "project_root", root)
         object.__setattr__(self, "read_root", read_root)
         object.__setattr__(self, "write_root", write_root)
+        object.__setattr__(self, "python_workdir", python_workdir)
         object.__setattr__(self, "log_path", log_path)
         object.__setattr__(
             self,
@@ -116,7 +141,7 @@ class ToolPolicy:
         object.__setattr__(
             self,
             "max_code_bytes",
-            max(1024, min(32 * 1024, self.max_code_bytes)),
+            max(1024, min(DEFAULT_MAX_CODE_BYTES, self.max_code_bytes)),
         )
         object.__setattr__(
             self,
@@ -126,7 +151,57 @@ class ToolPolicy:
         object.__setattr__(
             self,
             "python_timeout_seconds",
-            max(1, min(60, self.python_timeout_seconds)),
+            max(
+                1,
+                min(
+                    DEFAULT_PYTHON_TIMEOUT_SECONDS,
+                    self.python_timeout_seconds,
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "python_process_memory_bytes",
+            max(
+                MIN_PYTHON_PROCESS_MEMORY_BYTES,
+                min(
+                    MAX_PYTHON_PROCESS_MEMORY_BYTES,
+                    self.python_process_memory_bytes,
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "python_job_memory_bytes",
+            max(
+                MIN_PYTHON_JOB_MEMORY_BYTES,
+                min(
+                    MAX_PYTHON_JOB_MEMORY_BYTES,
+                    self.python_job_memory_bytes,
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "python_cpu_time_seconds",
+            max(
+                MIN_PYTHON_CPU_TIME_SECONDS,
+                min(
+                    MAX_PYTHON_CPU_TIME_SECONDS,
+                    self.python_cpu_time_seconds,
+                ),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "python_max_processes",
+            max(
+                MIN_PYTHON_MAX_PROCESSES,
+                min(
+                    MAX_PYTHON_MAX_PROCESSES,
+                    self.python_max_processes,
+                ),
+            ),
         )
         object.__setattr__(
             self,
@@ -139,6 +214,7 @@ class ToolPolicy:
         root = Path(project_root or PROJECT_ROOT).resolve()
         read_default = root
         write_default = root / "workspace"
+        python_default = root / "workspace" / "python"
         log_default = root / "logs" / "tool_calls.jsonl"
 
         read_root = _resolve_path(
@@ -146,6 +222,9 @@ class ToolPolicy:
         )
         write_root = _resolve_path(
             os.getenv("TOOL_WRITE_ROOT"), root, write_default
+        )
+        python_workdir = _resolve_path(
+            os.getenv("TOOL_PYTHON_WORKDIR"), root, python_default
         )
         log_path = _resolve_path(
             os.getenv("TOOL_LOG_PATH"), root, log_default
@@ -155,6 +234,7 @@ class ToolPolicy:
             project_root=root,
             read_root=read_root,
             write_root=write_root,
+            python_workdir=python_workdir,
             log_path=log_path,
             tools_enabled=_env_bool("TOOLS_ENABLED", False),
             allow_writes=_env_bool("TOOL_ALLOW_WRITES", False),
@@ -178,7 +258,7 @@ class ToolPolicy:
                 "TOOL_MAX_CODE_BYTES",
                 DEFAULT_MAX_CODE_BYTES,
                 1024,
-                32 * 1024,
+                DEFAULT_MAX_CODE_BYTES,
             ),
             max_list_entries=_env_int(
                 "TOOL_MAX_LIST_ENTRIES",
@@ -190,7 +270,31 @@ class ToolPolicy:
                 "TOOL_PYTHON_TIMEOUT_SECONDS",
                 DEFAULT_PYTHON_TIMEOUT_SECONDS,
                 1,
-                60,
+                DEFAULT_PYTHON_TIMEOUT_SECONDS,
+            ),
+            python_process_memory_bytes=_env_int(
+                "TOOL_PYTHON_PROCESS_MEMORY_BYTES",
+                DEFAULT_PYTHON_PROCESS_MEMORY_BYTES,
+                MIN_PYTHON_PROCESS_MEMORY_BYTES,
+                MAX_PYTHON_PROCESS_MEMORY_BYTES,
+            ),
+            python_job_memory_bytes=_env_int(
+                "TOOL_PYTHON_JOB_MEMORY_BYTES",
+                DEFAULT_PYTHON_JOB_MEMORY_BYTES,
+                MIN_PYTHON_JOB_MEMORY_BYTES,
+                MAX_PYTHON_JOB_MEMORY_BYTES,
+            ),
+            python_cpu_time_seconds=_env_int(
+                "TOOL_PYTHON_CPU_TIME_SECONDS",
+                DEFAULT_PYTHON_CPU_TIME_SECONDS,
+                MIN_PYTHON_CPU_TIME_SECONDS,
+                MAX_PYTHON_CPU_TIME_SECONDS,
+            ),
+            python_max_processes=_env_int(
+                "TOOL_PYTHON_MAX_PROCESSES",
+                DEFAULT_PYTHON_MAX_PROCESSES,
+                MIN_PYTHON_MAX_PROCESSES,
+                MAX_PYTHON_MAX_PROCESSES,
             ),
             max_tool_rounds=_env_int(
                 "TOOL_MAX_ROUNDS",

@@ -34,14 +34,29 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
         self.assertEqual(policy.read_root, root)
         self.assertEqual(policy.write_root, root / "workspace")
         self.assertEqual(
+            policy.python_workdir, root / "workspace" / "python"
+        )
+        self.assertEqual(
             policy.log_path, root / "logs" / "tool_calls.jsonl"
         )
+        self.assertEqual(
+            policy.python_process_memory_bytes, 256 * 1024 * 1024
+        )
+        self.assertEqual(
+            policy.python_job_memory_bytes, 512 * 1024 * 1024
+        )
+        self.assertEqual(policy.python_cpu_time_seconds, 10)
+        self.assertEqual(policy.python_max_processes, 8)
 
     def test_default_project_root_is_ai_assistant(self):
         with patch.dict(os.environ, {}, clear=True):
             policy = ToolPolicy.from_env()
         self.assertEqual(policy.project_root, PROJECT_ROOT)
         self.assertEqual(policy.read_root, PROJECT_ROOT)
+        self.assertEqual(
+            policy.python_workdir,
+            PROJECT_ROOT / "workspace" / "python",
+        )
 
     def test_environment_values_are_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,12 +70,17 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
                 "TOOL_LOG_CONTENT": "on",
                 "TOOL_READ_ROOT": "data",
                 "TOOL_WRITE_ROOT": "sandbox",
+                "TOOL_PYTHON_WORKDIR": "python-runs",
                 "TOOL_LOG_PATH": "audit/events.jsonl",
                 "TOOL_MAX_FILE_BYTES": "2048",
                 "TOOL_MAX_OUTPUT_BYTES": "4096",
                 "TOOL_MAX_CODE_BYTES": "8192",
                 "TOOL_MAX_LIST_ENTRIES": "50",
-                "TOOL_PYTHON_TIMEOUT_SECONDS": "20",
+                "TOOL_PYTHON_TIMEOUT_SECONDS": "7",
+                "TOOL_PYTHON_PROCESS_MEMORY_BYTES": "67108864",
+                "TOOL_PYTHON_JOB_MEMORY_BYTES": "134217728",
+                "TOOL_PYTHON_CPU_TIME_SECONDS": "5",
+                "TOOL_PYTHON_MAX_PROCESSES": "3",
                 "TOOL_MAX_ROUNDS": "3",
             }
             with patch.dict(os.environ, env, clear=True):
@@ -74,12 +94,23 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
         self.assertTrue(policy.log_content)
         self.assertEqual(policy.read_root, root / "data")
         self.assertEqual(policy.write_root, root / "sandbox")
+        self.assertEqual(
+            policy.python_workdir, root / "python-runs"
+        )
         self.assertEqual(policy.log_path, root / "audit" / "events.jsonl")
         self.assertEqual(policy.max_file_bytes, 2048)
         self.assertEqual(policy.max_output_bytes, 4096)
         self.assertEqual(policy.max_code_bytes, 8192)
         self.assertEqual(policy.max_list_entries, 50)
-        self.assertEqual(policy.python_timeout_seconds, 20)
+        self.assertEqual(policy.python_timeout_seconds, 7)
+        self.assertEqual(
+            policy.python_process_memory_bytes, 64 * 1024 * 1024
+        )
+        self.assertEqual(
+            policy.python_job_memory_bytes, 128 * 1024 * 1024
+        )
+        self.assertEqual(policy.python_cpu_time_seconds, 5)
+        self.assertEqual(policy.python_max_processes, 3)
         self.assertEqual(policy.max_tool_rounds, 3)
 
     def test_invalid_environment_values_fall_back_or_clamp(self):
@@ -92,6 +123,10 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
                 "TOOL_MAX_CODE_BYTES": "999999",
                 "TOOL_MAX_LIST_ENTRIES": "0",
                 "TOOL_PYTHON_TIMEOUT_SECONDS": "0",
+                "TOOL_PYTHON_PROCESS_MEMORY_BYTES": "1",
+                "TOOL_PYTHON_JOB_MEMORY_BYTES": "999999999999",
+                "TOOL_PYTHON_CPU_TIME_SECONDS": "0",
+                "TOOL_PYTHON_MAX_PROCESSES": "0",
                 "TOOL_MAX_ROUNDS": "99",
             }
             with patch.dict(os.environ, env, clear=True):
@@ -100,7 +135,7 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
         self.assertFalse(policy.tools_enabled)
         self.assertEqual(policy.max_file_bytes, 64 * 1024)
         self.assertEqual(policy.max_output_bytes, 1024)
-        self.assertEqual(policy.max_code_bytes, 32 * 1024)
+        self.assertEqual(policy.max_code_bytes, 8192)
         self.assertEqual(policy.max_list_entries, 1)
         self.assertEqual(policy.python_timeout_seconds, 1)
         self.assertEqual(policy.max_tool_rounds, 4)
@@ -112,6 +147,7 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
             env = {
                 "TOOL_READ_ROOT": str(outside),
                 "TOOL_WRITE_ROOT": str(outside),
+                "TOOL_PYTHON_WORKDIR": str(outside),
                 "TOOL_LOG_PATH": str(outside / "audit.jsonl"),
             }
             with patch.dict(os.environ, env, clear=True):
@@ -119,6 +155,9 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
 
         self.assertEqual(policy.read_root, root)
         self.assertEqual(policy.write_root, root / "workspace")
+        self.assertEqual(
+            policy.python_workdir, root / "workspace" / "python"
+        )
         self.assertEqual(
             policy.log_path, root / "logs" / "tool_calls.jsonl"
         )
@@ -129,6 +168,7 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
             env = {
                 "TOOL_READ_ROOT": "..",
                 "TOOL_WRITE_ROOT": "../outside",
+                "TOOL_PYTHON_WORKDIR": "../python",
                 "TOOL_LOG_PATH": "../audit.jsonl",
             }
             with patch.dict(os.environ, env, clear=True):
@@ -136,6 +176,9 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
 
         self.assertEqual(policy.read_root, root)
         self.assertEqual(policy.write_root, root / "workspace")
+        self.assertEqual(
+            policy.python_workdir, root / "workspace" / "python"
+        )
         self.assertEqual(
             policy.log_path, root / "logs" / "tool_calls.jsonl"
         )
@@ -148,6 +191,11 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
                 ToolPolicy(project_root=root, read_root=outside)
             with self.assertRaises(ValueError):
                 ToolPolicy(project_root=root, write_root=outside)
+            with self.assertRaises(ValueError):
+                ToolPolicy(
+                    project_root=root,
+                    python_workdir=outside,
+                )
             with self.assertRaises(ValueError):
                 ToolPolicy(
                     project_root=root,
@@ -171,6 +219,16 @@ class ToolPolicyDefaultsTests(unittest.TestCase):
         self.assertEqual(policy.max_list_entries, 1)
         self.assertEqual(policy.python_timeout_seconds, 1)
         self.assertEqual(policy.max_tool_rounds, 4)
+
+    def test_python_limits_have_hard_caps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = ToolPolicy(
+                project_root=Path(tmp),
+                max_code_bytes=999999,
+                python_timeout_seconds=999,
+            )
+        self.assertEqual(policy.max_code_bytes, 8192)
+        self.assertEqual(policy.python_timeout_seconds, 10)
 
 
 class ToolPolicyDecisionTests(unittest.TestCase):
