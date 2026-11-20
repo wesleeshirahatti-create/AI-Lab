@@ -1,6 +1,9 @@
 from collections.abc import Mapping
+from pathlib import Path
 
 from .base import Tool, ToolSpec
+from .files import ListFilesTool, ReadFileTool
+from .policy import ToolPolicy
 
 
 class ToolRegistry:
@@ -34,9 +37,53 @@ class ToolRegistry:
         return len(self._tools)
 
 
-def build_default_registry() -> ToolRegistry:
+def build_default_registry(
+    root: Path | str | ToolPolicy | None = None,
+    *,
+    policy: ToolPolicy | None = None,
+    read_root: Path | str | None = None,
+    max_file_bytes: int | None = None,
+    max_output_bytes: int | None = None,
+    max_list_entries: int | None = None,
+) -> ToolRegistry:
+    if isinstance(root, ToolPolicy):
+        policy = root
+        root = None
+
+    base_root = read_root if read_root is not None else root
+    if policy is not None:
+        if base_root is None:
+            base_root = policy.read_root
+        if max_file_bytes is None:
+            max_file_bytes = policy.max_file_bytes
+        if max_output_bytes is None:
+            max_output_bytes = policy.max_output_bytes
+        if max_list_entries is None:
+            max_list_entries = policy.max_list_entries
+
     registry = ToolRegistry()
+    registry.register(
+        ListFilesTool(
+            base_root,
+            max_list_entries=max_list_entries,
+            max_output_bytes=max_output_bytes,
+        )
+    )
+    registry.register(
+        ReadFileTool(
+            base_root,
+            max_file_bytes=max_file_bytes,
+            max_output_bytes=max_output_bytes,
+        )
+    )
     return registry
 
 
-__all__ = ["ToolRegistry", "build_default_registry"]
+build_readonly_registry = build_default_registry
+
+
+__all__ = [
+    "ToolRegistry",
+    "build_default_registry",
+    "build_readonly_registry",
+]

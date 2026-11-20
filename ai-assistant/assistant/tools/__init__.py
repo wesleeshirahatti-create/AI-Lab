@@ -8,14 +8,34 @@ from .base import (
     ToolSpec,
     ToolValidationError,
 )
+from .files import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_READ_MAX_CHARS,
+    ListFiles,
+    ListFilesTool,
+    ReadFile,
+    ReadFileTool,
+    UnsafePathError,
+    resolve_workspace_path,
+)
 from .gateway import ApprovalCallback, ToolGateway
 from .policy import PROJECT_ROOT, ToolPolicy
-from .registry import ToolRegistry, build_default_registry
+from .registry import (
+    ToolRegistry,
+    build_default_registry,
+    build_readonly_registry,
+)
 
 __all__ = [
     "ApprovalCallback",
     "AuditLogger",
+    "DEFAULT_MAX_CHARS",
+    "DEFAULT_READ_MAX_CHARS",
+    "ListFiles",
+    "ListFilesTool",
     "PROJECT_ROOT",
+    "ReadFile",
+    "ReadFileTool",
     "Tool",
     "ToolError",
     "ToolExecutionError",
@@ -26,5 +46,8 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "ToolValidationError",
+    "UnsafePathError",
     "build_default_registry",
+    "build_readonly_registry",
+    "resolve_workspace_path",
 ]

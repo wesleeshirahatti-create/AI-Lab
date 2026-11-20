@@ -3,18 +3,99 @@ import json
 import socket
 import urllib.error
 import urllib.request
+import uuid
 from collections import deque
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from config import Settings
+
+from .tools import (
+    ApprovalCallback,
+    AuditLogger,
+    ToolGateway,
+    ToolPolicy,
+    ToolRegistry,
+    ToolResult,
+    build_default_registry,
+)
+
+MAX_TOOL_CALL_ROUNDS = 2
+MAX_TOOL_CALLS_PER_ROUND = 8
+MAX_TOOL_CONTEXT_MULTIPLIER = 2
 
 
 class _OllamaError(Exception):
     pass
 
 
+@dataclass(frozen=True)
+class _ToolCall:
+    name: str
+    arguments: Any
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", "ignore")
+
+
 class Assistant:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        policy: ToolPolicy | None = None,
+        *,
+        tool_policy: ToolPolicy | None = None,
+        registry: ToolRegistry | None = None,
+        gateway: ToolGateway | None = None,
+        audit_logger: AuditLogger | None = None,
+        approver: ApprovalCallback | None = None,
+    ) -> None:
         self.settings = settings or Settings.from_env()
+        chosen_policy = tool_policy or policy or ToolPolicy.from_env()
+
+        if gateway is not None:
+            self.gateway = gateway
+            gateway_policy = getattr(gateway, "policy", None)
+            self.policy = (
+                gateway_policy
+                if isinstance(gateway_policy, ToolPolicy)
+                else chosen_policy
+            )
+            gateway_registry = getattr(gateway, "registry", None)
+            self.registry = (
+                registry
+                or (
+                    gateway_registry
+                    if isinstance(gateway_registry, ToolRegistry)
+                    else None
+                )
+                or build_default_registry(policy=self.policy)
+            )
+            gateway_audit = getattr(gateway, "audit_logger", None)
+            self.audit_logger = audit_logger or (
+                gateway_audit
+                if isinstance(gateway_audit, AuditLogger)
+                else None
+            )
+        else:
+            self.policy = chosen_policy
+            self.registry = registry or build_default_registry(policy=self.policy)
+            self.audit_logger = audit_logger or AuditLogger(self.policy.log_path)
+            self.gateway = ToolGateway(
+                self.policy,
+                self.registry,
+                self.audit_logger,
+                approver=approver,
+            )
+
+        self.tool_policy = self.policy
         self._history: deque[dict[str, str]] = deque(
             maxlen=self.settings.max_history_messages
         )
@@ -46,6 +127,13 @@ class Assistant:
         normalized = message.lower()
 
         if normalized in {"help", "/help"}:
+            if self.policy.tools_enabled:
+                return (
+                    f"Type a message to chat with {self.settings.ollama_model} "
+                    "through Ollama, or use 'exit'/'quit' to leave. Read-only "
+                    "tools are enabled: list_files and read_file. The assistant "
+                    "cannot write files, run Python, or use a shell."
+                )
             return (
                 f"Type a message to chat with {self.settings.ollama_model} through "
                 "Ollama, or use 'exit'/'quit' to leave. This assistant can chat "
@@ -55,18 +143,192 @@ class Assistant:
         return self._query_ollama()
 
     def _query_ollama(self) -> str:
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    f"You are {self.settings.assistant_name}, a helpful, concise "
-                    "AI assistant running locally through Ollama. Reply in plain text."
-                ),
-            }
+        messages: list[dict[str, Any]] = self._build_messages()
+        tools = self._tool_definitions()
+        max_rounds = (
+            min(MAX_TOOL_CALL_ROUNDS, self.policy.max_tool_rounds)
+            if tools is not None
+            else 0
+        )
+        rounds = 0
+        request_id = uuid.uuid4().hex
+        remaining_budget = (
+            self.policy.max_output_bytes * MAX_TOOL_CONTEXT_MULTIPLIER
+        )
+
+        while True:
+            response_message = self._request_chat(messages, tools)
+            content = response_message.get("content")
+            if not isinstance(content, str):
+                content = ""
+            raw_tool_calls = response_message.get("tool_calls")
+            tool_calls = self._parse_tool_calls(raw_tool_calls)
+
+            if not tool_calls:
+                if content.strip():
+                    return content.strip()
+                raise _OllamaError(
+                    "Ollama returned an empty response. Please try again."
+                )
+
+            if tools is None:
+                if content.strip():
+                    return content.strip()
+                raise _OllamaError(
+                    "Ollama requested a tool, but tools are disabled. "
+                    "Set TOOLS_ENABLED=true to allow read-only tools."
+                )
+
+            if rounds >= max_rounds:
+                if content.strip():
+                    return content.strip()
+                return (
+                    "I stopped because the maximum of "
+                    f"{max_rounds} tool-call round(s) was reached."
+                )
+
+            rounds += 1
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": raw_tool_calls,
+                }
+            )
+
+            for index, tool_call in enumerate(tool_calls):
+                if index >= MAX_TOOL_CALLS_PER_ROUND:
+                    result = ToolResult.failure(
+                        tool_call.name or "<invalid>",
+                        "Too many tool calls in one round.",
+                    )
+                else:
+                    result = self._execute_tool_call(tool_call, request_id)
+
+                text = self._format_tool_result(result, remaining_budget)
+                remaining_budget -= len(text.encode("utf-8"))
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_name": tool_call.name or "<invalid>",
+                        "content": text,
+                    }
+                )
+
+    def _build_messages(self) -> list[dict[str, Any]]:
+        system_content = (
+            f"You are {self.settings.assistant_name}, a helpful, concise "
+            "AI assistant running locally through Ollama. Reply in plain text."
+        )
+        if self.policy.tools_enabled:
+            system_content += (
+                " You may use the provided read-only tools to inspect files in "
+                "the workspace. Permissions are enforced by the application; "
+                "never claim to approve or grant permissions yourself."
+            )
+
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content}
         ]
         messages.extend(self._history)
+        return messages
 
-        payload = {
+    def _tool_definitions(self) -> list[dict[str, Any]] | None:
+        if not self.policy.tools_enabled:
+            return None
+
+        definitions: list[dict[str, Any]] = []
+        for spec in self.registry.specs():
+            if self.policy.denial_reason(spec) is not None:
+                continue
+            definitions.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": spec.name,
+                        "description": spec.description,
+                        "parameters": dict(spec.parameters),
+                    },
+                }
+            )
+        return definitions or None
+
+    @staticmethod
+    def _parse_tool_calls(raw_tool_calls: Any) -> list[_ToolCall]:
+        if not isinstance(raw_tool_calls, list):
+            return []
+
+        calls: list[_ToolCall] = []
+        for item in raw_tool_calls:
+            if not isinstance(item, Mapping):
+                calls.append(_ToolCall("", {}))
+                continue
+
+            function = item.get("function")
+            if not isinstance(function, Mapping):
+                function = item if "name" in item else {}
+
+            name = function.get("name")
+            if not isinstance(name, str):
+                name = ""
+            name = name.strip()
+
+            arguments = function.get("arguments", {})
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except (TypeError, ValueError):
+                    pass
+            if arguments is None:
+                arguments = {}
+
+            calls.append(_ToolCall(name, arguments))
+
+        return calls
+
+    def _execute_tool_call(
+        self, tool_call: _ToolCall, request_id: str
+    ) -> ToolResult:
+        if not tool_call.name:
+            return ToolResult.failure("<invalid>", "Invalid tool call.")
+        try:
+            result = self.gateway.dispatch(
+                tool_call.name,
+                tool_call.arguments,
+                request_id=request_id,
+            )
+        except Exception:
+            return ToolResult.failure(
+                tool_call.name, "Tool execution failed."
+            )
+        if not isinstance(result, ToolResult):
+            return ToolResult.failure(
+                tool_call.name, "Tool returned an invalid result."
+            )
+        return result
+
+    def _format_tool_result(
+        self, result: ToolResult, remaining_budget: int
+    ) -> str:
+        if remaining_budget <= 0:
+            return "[tool result omitted: context limit reached]"
+
+        if result.ok:
+            text = result.output
+            if result.metadata.get("truncated"):
+                text = f"{text}\n[truncated]"
+        else:
+            text = f"Error: {result.error}"
+
+        limit = max(0, min(self.policy.max_output_bytes, remaining_budget))
+        return _truncate_utf8(text, limit)
+
+    def _request_chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "model": self.settings.ollama_model,
             "messages": messages,
             "stream": False,
@@ -75,6 +337,9 @@ class Assistant:
                 "num_ctx": self.settings.ollama_num_ctx,
             },
         }
+        if tools:
+            payload["tools"] = tools
+
         request = urllib.request.Request(
             self._endpoint,
             data=json.dumps(payload).encode("utf-8"),
@@ -133,15 +398,12 @@ class Assistant:
             )
 
         response_message = body.get("message")
-        content = (
-            response_message.get("content")
-            if isinstance(response_message, dict)
-            else None
-        )
-        if not isinstance(content, str) or not content.strip():
-            raise _OllamaError("Ollama returned an empty response. Please try again.")
+        if not isinstance(response_message, dict):
+            raise _OllamaError(
+                "Ollama returned an invalid response. Please try again."
+            )
 
-        return content.strip()
+        return response_message
 
     def _timeout_message(self) -> str:
         return (

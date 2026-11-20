@@ -8,11 +8,13 @@ from support import FakeTool
 
 
 class ToolRegistryTests(unittest.TestCase):
-    def test_default_registry_has_no_tools(self):
+    def test_default_registry_contains_only_read_only_tools(self):
         registry = build_default_registry()
-        self.assertEqual(registry.names(), ())
-        self.assertEqual(len(registry), 0)
-        self.assertIsNone(registry.get("read_file"))
+        self.assertEqual(registry.names(), ("list_files", "read_file"))
+        self.assertEqual(len(registry), 2)
+        self.assertIsNotNone(registry.get("read_file"))
+        self.assertIsNone(registry.get("write_file"))
+        self.assertIsNone(registry.get("run_python"))
 
     def test_register_lookup_and_specs(self):
         registry = ToolRegistry()
@@ -49,7 +51,7 @@ class ToolRegistryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             registry = build_default_registry()
-        self.assertEqual(registry.names(), ())
+        self.assertEqual(registry.names(), ("list_files", "read_file"))
 
 
 if __name__ == "__main__":
